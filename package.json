@@ -44,10 +44,20 @@
     "prepublishOnly": "npm run check"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": "^1.18.21",
     "@opentui/core": ">=0.4.5",
     "@opentui/keymap": ">=0.4.5",
     "@opentui/solid": ">=0.4.5"
+  },
+  "peerDependenciesMeta": {
+    "@opentui/core": {
+      "optional": true
+    },
+    "@opentui/keymap": {
+      "optional": true
+    },
+    "@opentui/solid": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@opencode-ai/plugin": "1.18.21",
