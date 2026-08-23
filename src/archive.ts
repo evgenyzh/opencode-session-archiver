@@ -27,7 +27,7 @@ export type ArchiveClient = {
       noReply: true
       agent?: string
       model?: { providerID: string; modelID: string }
-      parts: Array<{ type: "text"; text: string; synthetic: true }>
+      parts: Array<{ type: "text"; text: string; synthetic?: boolean }>
     }): Promise<Result<unknown>>
     delete(input: { sessionID: string }): Promise<Result<boolean>>
   }
@@ -200,7 +200,9 @@ export async function prepareArchive(
     "Could not create replacement session",
   )
   const imported = [
-    "# Previous session context",
+    "# Archived session context",
+    `Source: ${source.title} (${source.id})`,
+    `Archived: ${new Date().toISOString()}`,
     "## Compaction summary",
     summaryText,
     tail ? `## Recent tail\n${tail}` : "",
@@ -212,7 +214,7 @@ export async function prepareArchive(
         noReply: true,
         agent: user.agent,
         model: { providerID: user.model.providerID, modelID: user.model.modelID },
-        parts: [{ type: "text", text: imported, synthetic: true }],
+        parts: [{ type: "text", text: imported }],
       }),
       "Could not import compact context",
     )
@@ -221,7 +223,7 @@ export async function prepareArchive(
     throw error
   }
   const persisted = await data(client.session.messages({ sessionID: target.id }), "Could not verify replacement session")
-  if (!persisted.some((entry) => entry.parts.some((part) => part.type === "text" && part.synthetic && part.text === imported))) {
+  if (!persisted.some((entry) => entry.parts.some((part) => part.type === "text" && !part.synthetic && part.text === imported))) {
     await client.session.delete({ sessionID: target.id })
     throw new Error("Replacement session did not retain the imported context")
   }

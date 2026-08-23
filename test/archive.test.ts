@@ -36,7 +36,7 @@ function client(overrides: Partial<ArchiveClient["session"]> = {}): ArchiveClien
           { info: { id: "msg_compact", sessionID, role: "user" as const, time: { created: 2 }, agent: "build", model: user.model }, parts: [{ id: "part_compact", sessionID, messageID: "msg_compact", type: "compaction" as const, auto: false }] },
           { info: { id: "msg_summary", sessionID, role: "assistant" as const, parentID: "msg_compact", time: { created: 3 }, modelID: "gpt-test", providerID: "openai", mode: "compaction", agent: "compaction", path: { cwd: "/tmp", root: "/tmp" }, summary: true, finish: "stop", cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } }, parts: [{ id: "part_summary", sessionID, messageID: "msg_summary", type: "text" as const, text: "Concise summary" }] },
           ] : []),
-        ] : [{ info: user, parts: [{ id: "part_import", sessionID, messageID: user.id, type: "text" as const, synthetic: true, text: imported }] }],
+        ] : [{ info: user, parts: [{ id: "part_import", sessionID, messageID: user.id, type: "text" as const, text: imported }] }],
       }),
       summarize: async () => { compacted = true; return { data: true } },
       create: async () => ({ data: { ...source, id: "ses_target", title: "Replacement" } }),
@@ -70,6 +70,10 @@ describe("archive workflow", () => {
     const prepared = await prepareArchive(sdk, source.id, "Replacement")
     expect(prepared.target.id).toBe("ses_target")
     expect((await sdk.session.get({ sessionID: source.id })).data).toBeDefined()
+  })
+
+  it("persists the archive summary as a visible target message", async () => {
+    await expect(prepareArchive(client(), source.id, "Replacement")).resolves.toMatchObject({ target: { id: "ses_target" } })
   })
 
   it("refuses active source descendants", async () => {
