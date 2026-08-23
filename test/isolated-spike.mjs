@@ -11,7 +11,7 @@ const server = spawn(binary, ["serve", "--pure", "--hostname", "127.0.0.1", "--p
 const client = createOpencodeClient({
   baseUrl: `http://127.0.0.1:${port}`,
   directory: process.cwd(),
-  fetch: (request) => fetch(request, { signal: AbortSignal.timeout(2_000) }),
+  fetch: (request) => fetch(request, { signal: AbortSignal.timeout(5_000) }),
 })
 let rootID
 let childID
@@ -32,16 +32,39 @@ async function waitForServer() {
 
 try {
   await waitForServer()
+
+  const prompted = await client.session.prompt({
+    sessionID: rootID,
+    noReply: true,
+    parts: [{ type: "text", text: "spike message" }],
+  })
+  if (prompted.error !== undefined || prompted.data === undefined) {
+    throw new Error(`Could not create a message: ${String(prompted.error)}`)
+  }
+
+  const before = await client.session.messages({ sessionID: rootID })
+  const messageID = before.data?.find((entry) => entry.parts.some((part) => part.type === "text" && part.text === "spike message"))?.info.id
+  if (!messageID) throw new Error("The spike message was not persisted")
+
+  const removed = await client.session.deleteMessage({ sessionID: rootID, messageID })
+  if (removed.error !== undefined || removed.data === undefined) {
+    throw new Error(`deleteMessage failed: ${String(removed.error)}`)
+  }
+  const after = await client.session.messages({ sessionID: rootID })
+  if (after.data?.some((entry) => entry.info.id === messageID)) {
+    throw new Error("deleteMessage did not remove the message")
+  }
+
   const child = await client.session.create({ parentID: rootID, title: "session-archiver spike child" })
   if (!child.data) throw new Error(`Could not create child session: ${String(child.error)}`)
   childID = child.data.id
 
-  const removed = await client.session.delete({ sessionID: rootID })
-  if (!removed.data) throw new Error(`Could not delete root session: ${String(removed.error)}`)
+  const deleted = await client.session.delete({ sessionID: rootID })
+  if (!deleted.data) throw new Error(`Could not delete root session: ${String(deleted.error)}`)
   const root = await client.session.get({ sessionID: rootID })
   const descendant = await client.session.get({ sessionID: childID })
-  if (root.data || descendant.data) throw new Error("Session deletion did not cascade to the disposable child")
-  console.log("Spike passed: SDK create, child relationship, delete, and cascade verification.")
+  if (root.data || descendant.data) throw new Error("Session deletion did not cascade to the child")
+  console.log("Spike passed: message delete, child cascade, and verification.")
 } finally {
   for (const sessionID of [rootID, childID].filter(Boolean)) {
     await client.session.delete({ sessionID }).catch(() => undefined)
