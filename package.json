@@ -1,0 +1,61 @@
+{
+  "name": "@evgenyzh/opencode-session-archiver",
+  "version": "0.1.0",
+  "description": "Safely replace an OpenCode session with its compact summary.",
+  "license": "MIT",
+  "author": "Evgeny Zhuravlev",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/evgenyzh/opencode-session-archiver.git"
+  },
+  "bugs": {
+    "url": "https://github.com/evgenyzh/opencode-session-archiver/issues"
+  },
+  "homepage": "https://github.com/evgenyzh/opencode-session-archiver#readme",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "session",
+    "archive",
+    "compaction"
+  ],
+  "engines": {
+    "node": ">=22",
+    "opencode": ">=1.18.21 <2"
+  },
+  "exports": {
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup src/tui.tsx --format esm --dts --out-dir dist --clean --external @opencode-ai/plugin --external @opencode-ai/sdk --external @opentui/core --external @opentui/keymap --external @opentui/solid",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "spike": "node test/isolated-spike.mjs",
+    "check": "npm run typecheck && npm run test && npm run build && npm pack --dry-run"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "^1.18.21",
+    "@opentui/core": ">=0.4.5",
+    "@opentui/keymap": ">=0.4.5",
+    "@opentui/solid": ">=0.4.5"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.21",
+    "@opentui/core": "0.4.5",
+    "@opentui/keymap": "0.4.5",
+    "@opentui/solid": "0.4.5",
+    "@types/node": "24.12.2",
+    "tsup": "8.5.1",
+    "typescript": "5.8.2",
+    "vitest": "4.1.11"
+  }
+}
