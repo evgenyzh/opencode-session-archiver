@@ -10,8 +10,8 @@ function askTitle(api: Parameters<TuiPluginModule["tui"]>[0]): Promise<{ cancell
       () => <Prompt
         title="Archive session"
         placeholder="Optional replacement title; leave blank to keep current"
-        onConfirm={(value) => { api.ui.dialog.clear(); resolve({ cancelled: false, title: value.trim() || undefined }) }}
-        onCancel={() => { api.ui.dialog.clear(); resolve({ cancelled: true }) }}
+        onConfirm={(value) => { resolve({ cancelled: false, title: value.trim() || undefined }); api.ui.dialog.clear() }}
+        onCancel={() => { resolve({ cancelled: true }); api.ui.dialog.clear() }}
       />,
       () => resolve({ cancelled: true }),
     )
@@ -28,7 +28,7 @@ function confirm(api: Parameters<TuiPluginModule["tui"]>[0], prepared: PreparedA
       "This cannot be undone.",
     ].join("\n")
     api.ui.dialog.replace(
-      () => <Confirm title="Delete original session?" message={message} onConfirm={() => { api.ui.dialog.clear(); resolve(true) }} onCancel={() => { api.ui.dialog.clear(); resolve(false) }} />,
+      () => <Confirm title="Delete original session?" message={message} onConfirm={() => resolve(true)} onCancel={() => resolve(false)} />,
       () => resolve(false),
     )
   })
