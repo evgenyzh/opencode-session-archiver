@@ -14,7 +14,7 @@ For local development, add the source module to `~/.config/opencode/tui.json`:
 
 ```json
 {
-  "plugin": [["/absolute/path/to/opencode-session-archiver/src/tui.tsx"]]
+  "plugin": [["/absolute/path/to/opencode-session-archiver/src/tui.tsx", {}]]
 }
 ```
 
