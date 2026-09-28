@@ -20,10 +20,14 @@ export type PreparedArchive = {
   keepMessageIDs: string[]
   deleteMessageIDs: string[]
   agentChildIDs: string[]
+  orphanChildIDs: string[]
   summaryChars: number
 }
 
 type WithParts = { info: Message; parts: Part[] }
+
+const DELETE_CONCURRENCY = 8
+const CHILD_CONCURRENCY = 4
 
 function message(error: unknown): string {
   if (error instanceof Error) return error.message
@@ -37,6 +41,19 @@ async function data<T>(request: Promise<Result<T>>, action: string): Promise<T> 
     throw new Error(`${action}: ${message(result.error)}`)
   }
   return result.data
+}
+
+async function each<T>(items: T[], limit: number, run: (item: T) => Promise<void>): Promise<void> {
+  const queue = [...items]
+  const worker = async (): Promise<void> => {
+    while (queue.length > 0) {
+      const item = queue.shift() as T
+      await run(item)
+    }
+  }
+  const results = await Promise.allSettled(Array.from({ length: Math.min(limit, queue.length) }, worker))
+  const failed = results.find((result) => result.status === "rejected")
+  if (failed?.status === "rejected") throw failed.reason
 }
 
 function text(parts: Part[]): string {
@@ -107,6 +124,13 @@ function isAgentChild(child: Session, parentID: string, parentMessages: WithPart
   return false
 }
 
+function isOrphanSubagent(child: Session, parentID: string): boolean {
+  if (child.parentID !== parentID) return false
+  if (typeof child.agent !== "string" || child.agent.length === 0) return false
+  const match = /\(@([^()\s]+) subagent\)$/.exec(child.title)
+  return match?.[1] === child.agent
+}
+
 export async function prepareArchive(client: ArchiveClient, sourceID: string): Promise<PreparedArchive> {
   const source = await data(client.session.get({ sessionID: sourceID }), "Could not load session")
   if (source.parentID) throw new Error("Archive the root session, not a child session")
@@ -148,6 +172,10 @@ export async function prepareArchive(client: ArchiveClient, sourceID: string): P
 
   const children = await data(client.session.children({ sessionID: sourceID }), "Could not list child sessions")
   const agentChildIDs = children.filter((child) => isAgentChild(child, sourceID, after)).map((child) => child.id)
+  const known = new Set(agentChildIDs)
+  const orphanChildIDs = children
+    .filter((child) => !known.has(child.id) && isOrphanSubagent(child, sourceID))
+    .map((child) => child.id)
 
   return {
     sourceID,
@@ -155,28 +183,31 @@ export async function prepareArchive(client: ArchiveClient, sourceID: string): P
     keepMessageIDs: [...keep],
     deleteMessageIDs,
     agentChildIDs,
+    orphanChildIDs,
     summaryChars: text(pair.summary.parts).length,
   }
 }
 
 export async function deletePreparedArchive(client: ArchiveClient, prepared: PreparedArchive): Promise<void> {
-  for (const messageID of prepared.deleteMessageIDs) {
+  await each(prepared.deleteMessageIDs, DELETE_CONCURRENCY, async (messageID) => {
     await data(
       client.session.deleteMessage({ sessionID: prepared.sourceID, messageID }),
       `Could not delete message ${messageID}`,
     )
-  }
-  for (const sessionID of prepared.agentChildIDs) {
+  })
+
+  const childIDs = [...prepared.agentChildIDs, ...prepared.orphanChildIDs]
+  await each(childIDs, CHILD_CONCURRENCY, async (sessionID) => {
     await data(client.session.delete({ sessionID }), `Could not delete child session ${sessionID}`)
-  }
+  })
 
   const kept = new Set(prepared.keepMessageIDs)
   const after = await data(client.session.messages({ sessionID: prepared.sourceID }), "Could not verify session")
   const survivors = after.filter((entry) => !kept.has(entry.info.id)).map((entry) => entry.info.id)
   if (survivors.length > 0) throw new Error(`OpenCode did not delete: ${survivors.join(", ")}`)
 
-  for (const sessionID of prepared.agentChildIDs) {
+  await each(childIDs, CHILD_CONCURRENCY, async (sessionID) => {
     const result = await client.session.get({ sessionID })
     if (result.data !== undefined) throw new Error(`OpenCode did not delete child session: ${sessionID}`)
-  }
+  })
 }

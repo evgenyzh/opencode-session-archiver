@@ -69,8 +69,9 @@ function client(opts: {
   overrides?: Partial<ArchiveClient["session"]>
   precompacted?: boolean
   onSummarize?: () => void
+  extraSessions?: string[]
 } = {}): ArchiveClient {
-  let exists = new Set([source.id, "ses_child"])
+  let exists = new Set([source.id, "ses_child", ...(opts.extraSessions ?? [])])
   let compacted = opts.precompacted ?? false
   const deletedMessages = new Set<string>()
   const deletedSessions = new Set<string>()
@@ -134,6 +135,7 @@ describe("archive workflow", () => {
     expect(prepared.keepMessageIDs).toEqual(["msg_compact", "msg_summary"])
     expect(prepared.deleteMessageIDs).toEqual([user.id, taskAssistant.id])
     expect(prepared.agentChildIDs).toEqual(["ses_child"])
+    expect(prepared.orphanChildIDs).toEqual([])
 
     await deletePreparedArchive(sdk, prepared)
     const after = (await sdk.session.messages({ sessionID: source.id })).data!.map((entry) => entry.info.id)
@@ -163,6 +165,28 @@ describe("archive workflow", () => {
     })
     const prepared = await prepareArchive(sdk, source.id)
     expect(prepared.agentChildIDs).toEqual([])
+    expect(prepared.orphanChildIDs).toEqual([])
+  })
+
+  it("deletes orphaned subagent children that lost their task evidence", async () => {
+    const sdk = client({
+      extraSessions: ["ses_orphan"],
+      overrides: {
+        children: async () => ({
+          data: [
+            { ...source, id: "ses_child", parentID: source.id, agent: "explore", title: "probe (@explore subagent)" },
+            { ...source, id: "ses_orphan", parentID: source.id, agent: "general", title: "Loose end (@general subagent)" },
+          ],
+        }),
+      },
+    })
+    const prepared = await prepareArchive(sdk, source.id)
+    expect(prepared.agentChildIDs).toEqual(["ses_child"])
+    expect(prepared.orphanChildIDs).toEqual(["ses_orphan"])
+
+    await deletePreparedArchive(sdk, prepared)
+    expect((await sdk.session.get({ sessionID: "ses_child" })).data).toBeUndefined()
+    expect((await sdk.session.get({ sessionID: "ses_orphan" })).data).toBeUndefined()
   })
 
   it("refuses a child session", async () => {

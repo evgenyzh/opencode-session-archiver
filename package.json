@@ -1,6 +1,6 @@
 {
   "name": "@evgenyzh/opencode-session-archiver",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Reduce an OpenCode session to its native compaction summary.",
   "license": "MIT",
   "author": "Evgeny Zhuravlev",
@@ -36,7 +36,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup src/tui.tsx --format esm --dts --out-dir dist --clean --external @opencode-ai/plugin --external @opencode-ai/sdk --external @opentui/core --external @opentui/keymap --external @opentui/solid",
+    "build": "tsup src/tui.tsx --format esm --dts --out-dir dist --clean --external @opencode-ai/plugin --external @opencode-ai/sdk --external @opentui/core --external @opentui/keymap --external @opentui/solid --external bun:sqlite",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "spike": "node test/isolated-spike.mjs",
