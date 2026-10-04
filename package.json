@@ -1,6 +1,6 @@
 {
   "name": "@evgenyzh/opencode-session-archiver",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Reduce an OpenCode session to its native compaction summary.",
   "license": "MIT",
   "author": "Evgeny Zhuravlev",
@@ -22,7 +22,7 @@
   ],
   "engines": {
     "node": ">=22",
-    "opencode": ">=1.18.21 <2"
+    "opencode": ">=2"
   },
   "exports": {
     "./tui": {
@@ -36,35 +36,40 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup src/tui.tsx --format esm --dts --out-dir dist --clean --external @opencode-ai/plugin --external @opencode-ai/sdk --external @opentui/core --external @opentui/keymap --external @opentui/solid --external bun:sqlite",
+    "build": "tsup src/tui.ts --format esm --dts --out-dir dist --clean --external @opencode/plugin --external @opencode/client --external @opentui/core --external @opentui/solid --external solid-js --external bun:sqlite",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "spike": "node test/isolated-spike.mjs",
     "check": "npm run typecheck && npm run test && npm run build && npm pack --dry-run",
     "prepublishOnly": "npm run check"
   },
+  "dependencies": {
+    "@opencode/plugin": "^2.0.22"
+  },
   "peerDependencies": {
-    "@opentui/core": ">=0.4.5",
-    "@opentui/keymap": ">=0.4.5",
-    "@opentui/solid": ">=0.4.5"
+    "@opentui/core": ">=0.5.14",
+    "@opentui/solid": ">=0.5.14",
+    "solid-js": ">=1.9.0"
   },
   "peerDependenciesMeta": {
     "@opentui/core": {
       "optional": true
     },
-    "@opentui/keymap": {
+    "@opentui/solid": {
       "optional": true
     },
-    "@opentui/solid": {
+    "solid-js": {
       "optional": true
     }
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "1.18.21",
-    "@opentui/core": "0.4.5",
-    "@opentui/keymap": "0.4.5",
-    "@opentui/solid": "0.4.5",
+    "@opencode/client": "2.0.22",
+    "@opencode/plugin": "2.0.22",
+    "@opencode/theme": "2.0.22",
+    "@opentui/core": "0.5.14",
+    "@opentui/solid": "0.5.14",
     "@types/node": "24.12.2",
+    "solid-js": "1.9.15",
     "tsup": "8.5.1",
     "typescript": "5.8.2",
     "vitest": "4.1.11"

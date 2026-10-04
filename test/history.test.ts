@@ -11,7 +11,24 @@ import {
 function sqlite(): SqliteDatabase {
   const database = new DatabaseSync(":memory:")
   database.exec(`
-    CREATE TABLE event_sequence (aggregate_id text PRIMARY KEY, seq integer NOT NULL, owner_id text);
+    CREATE TABLE session_message (
+      id text PRIMARY KEY,
+      session_id text NOT NULL,
+      seq integer NOT NULL,
+      type text NOT NULL,
+      data text NOT NULL
+    );
+    CREATE TABLE message (
+      id text PRIMARY KEY,
+      session_id text NOT NULL,
+      data text NOT NULL
+    );
+    CREATE TABLE part (
+      id text PRIMARY KEY,
+      message_id text NOT NULL,
+      session_id text NOT NULL,
+      data text NOT NULL
+    );
     CREATE TABLE event (
       id text PRIMARY KEY,
       aggregate_id text NOT NULL,
@@ -31,14 +48,49 @@ function sqlite(): SqliteDatabase {
   }
 }
 
-function seed(database: SqliteDatabase, aggregateID: string, events: Array<[number, string]>) {
-  database.run("INSERT INTO event_sequence (aggregate_id, seq, owner_id) VALUES (?, ?, NULL)", aggregateID, events.length - 1)
-  for (const [seq, data] of events) {
-    database.run("INSERT INTO event (id, aggregate_id, seq, type, data) VALUES (?, ?, ?, 'test', ?)", `evt_${aggregateID}_${seq}`, aggregateID, seq, data)
+function seedMessages(database: SqliteDatabase, sessionID: string, entries: Array<[number, string, string]>) {
+  for (const [seq, id, data] of entries) {
+    database.run(
+      "INSERT INTO session_message (id, session_id, seq, type, data) VALUES (?, ?, ?, 'assistant', ?)",
+      id,
+      sessionID,
+      seq,
+      data,
+    )
   }
 }
 
-function seqs(database: SqliteDatabase, aggregateID: string): number[] {
+function seedLegacy(database: SqliteDatabase, sessionID: string, messageID: string) {
+  database.run("INSERT INTO message (id, session_id, data) VALUES (?, ?, ?)", messageID, sessionID, "legacy message")
+  database.run(
+    "INSERT INTO part (id, message_id, session_id, data) VALUES (?, ?, ?, ?)",
+    `part_${messageID}`,
+    messageID,
+    sessionID,
+    "legacy part",
+  )
+}
+
+function seedEvents(database: SqliteDatabase, aggregateID: string, entries: Array<[number, string]>) {
+  for (const [seq, data] of entries) {
+    database.run(
+      "INSERT INTO event (id, aggregate_id, seq, type, data) VALUES (?, ?, ?, 'test', ?)",
+      `evt_${aggregateID}_${seq}`,
+      aggregateID,
+      seq,
+      data,
+    )
+  }
+}
+
+function seqs(database: SqliteDatabase, sessionID: string): number[] {
+  return database
+    .query("SELECT seq FROM session_message WHERE session_id = ? ORDER BY seq")
+    .all(sessionID)
+    .map((entry) => entry.seq as number)
+}
+
+function eventSeqs(database: SqliteDatabase, aggregateID: string): number[] {
   return database
     .query("SELECT seq FROM event WHERE aggregate_id = ? ORDER BY seq")
     .all(aggregateID)
@@ -46,48 +98,66 @@ function seqs(database: SqliteDatabase, aggregateID: string): number[] {
 }
 
 describe("history purge", () => {
-  it("finds the first event of the kept messages and purges only earlier history", () => {
+  it("keeps the compaction message and purges older messages, legacy rows, and events", () => {
     const database = sqlite()
-    seed(database, "ses_1", [
-      [0, JSON.stringify({ sessionID: "ses_1" })],
-      [1, JSON.stringify({ info: { id: "msg_old" } })],
-      [2, JSON.stringify({ messageID: "msg_old", text: "x".repeat(100) })],
-      [3, JSON.stringify({ info: { id: "msg_compact" } })],
-      [4, JSON.stringify({ info: { id: "msg_summary" } })],
-      [5, JSON.stringify({ sessionID: "ses_1", messageID: "msg_old" })],
+    seedMessages(database, "ses_1", [
+      [0, "msg_old", "x".repeat(200)],
+      [1, "msg_compact", JSON.stringify({ summary: "kept" })],
+      [2, "msg_after", "y".repeat(50)],
+    ])
+    seedLegacy(database, "ses_1", "legacy_1")
+    seedEvents(database, "ses_1", [
+      [0, JSON.stringify({ messageID: "msg_old" })],
+      [1, JSON.stringify({ messageID: "msg_compact" })],
+      [2, JSON.stringify({ messageID: "msg_after" })],
     ])
 
-    const purge = prepareHistoryPurge(database, "ses_1", ["msg_compact", "msg_summary"])
-    expect(purge).toMatchObject({ sessionID: "ses_1", boundarySeq: 3, events: 3 })
-    expect(purge?.bytes).toBeGreaterThan(100)
+    const purge = prepareHistoryPurge(database, "ses_1", "msg_compact")
+    expect(purge).toMatchObject({
+      sessionID: "ses_1",
+      compactionID: "msg_compact",
+      boundarySeq: 1,
+      messages: 2,
+      events: 1,
+      eventBoundarySeq: 1,
+      legacyMessages: 1,
+      legacyParts: 1,
+    })
+    expect(purge?.bytes).toBeGreaterThan(200)
 
     purgeHistory(database, purge!)
-    expect(seqs(database, "ses_1")).toEqual([3, 4, 5])
-
-    const again = prepareHistoryPurge(database, "ses_1", ["msg_compact", "msg_summary"])
-    expect(again).toMatchObject({ boundarySeq: 3, events: 0, bytes: 0 })
-  })
-
-  it("leaves other aggregates alone", () => {
-    const database = sqlite()
-    seed(database, "ses_1", [
-      [0, JSON.stringify({ info: { id: "msg_old" } })],
-      [1, JSON.stringify({ info: { id: "msg_keep" } })],
-    ])
-    seed(database, "ses_2", [
-      [0, JSON.stringify({ info: { id: "msg_other" } })],
-    ])
-
-    purgeHistory(database, prepareHistoryPurge(database, "ses_1", ["msg_keep"])!)
     expect(seqs(database, "ses_1")).toEqual([1])
-    expect(seqs(database, "ses_2")).toEqual([0])
+    expect(eventSeqs(database, "ses_1")).toEqual([1, 2])
+    expect(database.query("SELECT COUNT(*) AS count FROM message WHERE session_id = 'ses_1'").all()[0]?.count).toBe(0)
+    expect(database.query("SELECT COUNT(*) AS count FROM part WHERE session_id = 'ses_1'").all()[0]?.count).toBe(0)
+
+    const again = prepareHistoryPurge(database, "ses_1", "msg_compact")
+    expect(again).toMatchObject({ messages: 0, events: 0, bytes: 0, legacyMessages: 0, legacyParts: 0 })
   })
 
-  it("skips sessions without events for the kept messages", () => {
+  it("leaves other sessions and aggregates alone", () => {
     const database = sqlite()
-    seed(database, "ses_1", [[0, JSON.stringify({ info: { id: "msg_old" } })]])
-    expect(prepareHistoryPurge(database, "ses_1", ["msg_keep"])).toBeUndefined()
-    expect(prepareHistoryPurge(database, "ses_1", [])).toBeUndefined()
+    seedMessages(database, "ses_1", [
+      [0, "msg_old", "old"],
+      [1, "msg_keep", "keep"],
+    ])
+    seedMessages(database, "ses_2", [
+      [0, "msg_other", "other"],
+      [1, "msg_other_compact", "compact"],
+    ])
+    seedEvents(database, "ses_2", [[0, JSON.stringify({ messageID: "msg_other_compact" })]])
+
+    purgeHistory(database, prepareHistoryPurge(database, "ses_1", "msg_keep")!)
+    expect(seqs(database, "ses_1")).toEqual([1])
+    expect(seqs(database, "ses_2")).toEqual([0, 1])
+    expect(eventSeqs(database, "ses_2")).toEqual([0])
+  })
+
+  it("skips sessions without the compaction message", () => {
+    const database = sqlite()
+    seedMessages(database, "ses_1", [[0, "msg_old", "old"]])
+    expect(prepareHistoryPurge(database, "ses_1", "msg_missing")).toBeUndefined()
+    expect(prepareHistoryPurge(database, "ses_1", "")).toBeUndefined()
   })
 })
 

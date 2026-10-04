@@ -1,22 +1,18 @@
-import type { Message, Part, Session } from "@opencode-ai/sdk/v2"
+import type { OpenCodeClient, OpenCodeEvent, SessionInfo, SessionMessageCompactionCompleted, SessionMessageInfo } from "@opencode/client"
+
+type SessionClient = Pick<OpenCodeClient["session"], "get" | "list" | "active" | "compact" | "remove">
+type MessageClient = Pick<OpenCodeClient["message"], "list">
+type EventClient = Pick<OpenCodeClient["event"], "subscribe">
 
 export type ArchiveClient = {
-  session: {
-    get(input: { sessionID: string }): Promise<Result<Session>>
-    children(input: { sessionID: string }): Promise<Result<Session[]>>
-    status(): Promise<Result<Record<string, { type: string }>>>
-    messages(input: { sessionID: string }): Promise<Result<Array<{ info: Message; parts: Part[] }>>>
-    summarize(input: { sessionID: string; providerID: string; modelID: string; auto: boolean }): Promise<Result<boolean>>
-    deleteMessage(input: { sessionID: string; messageID: string }): Promise<Result<unknown>>
-    delete(input: { sessionID: string }): Promise<Result<boolean>>
-  }
+  session: SessionClient
+  message: MessageClient
+  event: EventClient
 }
-
-export type Result<T> = { data?: T; error?: unknown }
 
 export type PreparedArchive = {
   sourceID: string
-  source: Session
+  source: SessionInfo
   keepMessageIDs: string[]
   deleteMessageIDs: string[]
   agentChildIDs: string[]
@@ -24,23 +20,16 @@ export type PreparedArchive = {
   summaryChars: number
 }
 
-type WithParts = { info: Message; parts: Part[] }
-
-const DELETE_CONCURRENCY = 8
+const PAGE_LIMIT = 200
+const MAX_PAGES = 200
 const CHILD_CONCURRENCY = 4
+const COMPACTION_TIMEOUT_MS = 10 * 60 * 1000
+const CONTENT_TYPES = new Set(["user", "assistant", "synthetic", "shell", "skill", "compaction"])
 
 function message(error: unknown): string {
   if (error instanceof Error) return error.message
   if (typeof error === "string") return error
   return "Unknown OpenCode API error"
-}
-
-async function data<T>(request: Promise<Result<T>>, action: string): Promise<T> {
-  const result = await request
-  if (result.error !== undefined || result.data === undefined) {
-    throw new Error(`${action}: ${message(result.error)}`)
-  }
-  return result.data
 }
 
 async function each<T>(items: T[], limit: number, run: (item: T) => Promise<void>): Promise<void> {
@@ -56,67 +45,121 @@ async function each<T>(items: T[], limit: number, run: (item: T) => Promise<void
   if (failed?.status === "rejected") throw failed.reason
 }
 
-function text(parts: Part[]): string {
-  return parts
-    .filter((part): part is Extract<Part, { type: "text" }> => part.type === "text")
-    .map((part) => part.text)
-    .join("\n")
-    .trim()
-}
-
-function latestCompletedSummary(messages: WithParts[]): WithParts | undefined {
-  return [...messages].reverse().find(
-    (entry: WithParts) =>
-      entry.info.role === "assistant" &&
-      entry.info.summary === true &&
-      entry.info.finish !== undefined &&
-      entry.info.error === undefined &&
-      text(entry.parts).length > 0,
-  )
-}
-
-function completedSummary(messages: WithParts[], beforeIDs: Set<string>): WithParts {
-  const summary = [...messages].reverse().find(
-    (entry: WithParts) =>
-      entry.info.role === "assistant" &&
-      entry.info.summary === true &&
-      entry.info.finish !== undefined &&
-      entry.info.error === undefined &&
-      !beforeIDs.has(entry.info.id) &&
-      text(entry.parts).length > 0,
-  )
-  if (!summary) throw new Error("Compaction did not create a completed summary")
-  return summary
-}
-
-function latestUser(messages: WithParts[]): Extract<Message, { role: "user" }> {
-  const user = [...messages].reverse().find((entry: WithParts) => entry.info.role === "user")?.info
-  if (!user || user.role !== "user") throw new Error("Session has no user message with a model selection")
-  return user
-}
-
-function compactionPair(messages: WithParts[], summary: WithParts): { parent: WithParts; summary: WithParts } {
-  const parentID = "parentID" in summary.info ? summary.info.parentID : undefined
-  if (!parentID) throw new Error("Compaction summary has no parent message")
-  const parent = messages.find((entry) => entry.info.id === parentID)
-  if (!parent) throw new Error("Compaction summary parent message is missing")
-  if (parent.info.role !== "user" || !parent.parts.some((part) => part.type === "compaction")) {
-    throw new Error("Compaction summary parent is not a compaction message")
+async function allMessages(client: ArchiveClient, sessionID: string): Promise<SessionMessageInfo[]> {
+  const messages: SessionMessageInfo[] = []
+  let cursor: string | undefined
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const response = await client.message.list(
+      cursor === undefined
+        ? { sessionID, order: "asc", limit: PAGE_LIMIT }
+        : { sessionID, limit: PAGE_LIMIT, cursor },
+    )
+    messages.push(...response.data)
+    const next = response.cursor.next
+    if (next === undefined || next === null || response.data.length === 0) return messages
+    cursor = next
   }
-  return { parent, summary }
+  throw new Error("Could not read session messages: too many pages")
 }
 
-function isAgentChild(child: Session, parentID: string, parentMessages: WithParts[]): boolean {
+async function allChildren(client: ArchiveClient, sessionID: string): Promise<SessionInfo[]> {
+  const children: SessionInfo[] = []
+  let cursor: string | undefined
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const response = await client.session.list(
+      cursor === undefined
+        ? { parentID: sessionID, order: "asc", limit: PAGE_LIMIT }
+        : { limit: PAGE_LIMIT, cursor },
+    )
+    children.push(...response.data)
+    const next = response.cursor.next
+    if (next === undefined || next === null || response.data.length === 0) return children
+    cursor = next
+  }
+  throw new Error("Could not list child sessions: too many pages")
+}
+
+function isCompletedCompaction(candidate: SessionMessageInfo): candidate is SessionMessageCompactionCompleted {
+  return candidate.type === "compaction" && candidate.status === "completed"
+}
+
+function latestCompletedCompaction(messages: SessionMessageInfo[]): SessionMessageCompactionCompleted | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const candidate = messages[index]
+    if (candidate !== undefined && isCompletedCompaction(candidate)) return candidate
+  }
+  return undefined
+}
+
+function isCurrentCompaction(messages: SessionMessageInfo[], summary: SessionMessageCompactionCompleted): boolean {
+  const index = messages.findIndex((candidate) => candidate.id === summary.id)
+  if (index < 0) return false
+  return !messages.slice(index + 1).some((candidate) => CONTENT_TYPES.has(candidate.type))
+}
+
+async function waitForCompaction(
+  client: ArchiveClient,
+  sessionID: string,
+  start: () => Promise<void>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const controller = new AbortController()
+  const forward = (): void => controller.abort(signal?.reason)
+  if (signal?.aborted) forward()
+  else signal?.addEventListener("abort", forward, { once: true })
+  const timer = setTimeout(() => controller.abort(new Error("Compaction timed out")), COMPACTION_TIMEOUT_MS)
+
+  let markConnected: (() => void) | undefined
+  const connected = new Promise<void>((resolve) => {
+    markConnected = resolve
+  })
+  let settle: ((error?: unknown) => void) | undefined
+  const finished = new Promise<void>((resolve, reject) => {
+    settle = (error?: unknown) => (error === undefined ? resolve() : reject(error))
+  })
+
+  const reader = (async () => {
+    try {
+      for await (const event of client.event.subscribe({ signal: controller.signal, onActivity: () => markConnected?.() })) {
+        if (event.type === "session.compaction.ended" && event.data.sessionID === sessionID) {
+          settle?.()
+          return
+        }
+        if (event.type === "session.compaction.failed" && event.data.sessionID === sessionID) {
+          settle?.(new Error(`OpenCode compaction failed: ${event.data.error.message}`))
+          return
+        }
+      }
+      settle?.(new Error("OpenCode event stream ended before compaction finished"))
+    } catch (error) {
+      settle?.(controller.signal.aborted ? new Error("Compaction timed out") : error)
+    }
+  })()
+
+  try {
+    await Promise.race([connected, finished])
+    await start()
+    await finished
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener("abort", forward)
+    controller.abort()
+    await reader.catch(() => undefined)
+    await finished.catch(() => undefined)
+  }
+}
+
+function isAgentChild(child: SessionInfo, parentID: string, parentMessages: SessionMessageInfo[]): boolean {
   if (child.parentID !== parentID) return false
   for (const entry of parentMessages) {
-    if (entry.info.role !== "assistant") continue
-    for (const part of entry.parts) {
-      if (part.type !== "tool" || part.tool !== "task") continue
-      const state = part.state
-      const metadata = state.status === "pending" ? undefined : state.metadata
-      if (!metadata) continue
+    if (entry.type !== "assistant") continue
+    for (const content of entry.content) {
+      if (content.type !== "tool" || content.name !== "task") continue
+      if (content.state.status === "streaming") continue
+      const metadata = content.state.metadata
+      if (metadata === undefined) continue
       if (metadata.sessionId !== child.id || metadata.parentSessionId !== parentID) continue
-      const input = part.state.input as { subagent_type?: unknown }
+      const input = content.state.input as { subagent_type?: unknown }
       if (typeof input.subagent_type === "string" && input.subagent_type !== child.agent) continue
       return true
     }
@@ -124,54 +167,51 @@ function isAgentChild(child: Session, parentID: string, parentMessages: WithPart
   return false
 }
 
-function isOrphanSubagent(child: Session, parentID: string): boolean {
+function isOrphanSubagent(child: SessionInfo, parentID: string): boolean {
   if (child.parentID !== parentID) return false
   if (typeof child.agent !== "string" || child.agent.length === 0) return false
+  if (typeof child.title !== "string") return false
   const match = /\(@([^()\s]+) subagent\)$/.exec(child.title)
   return match?.[1] === child.agent
 }
 
-export async function prepareArchive(client: ArchiveClient, sourceID: string): Promise<PreparedArchive> {
-  const source = await data(client.session.get({ sessionID: sourceID }), "Could not load session")
+export async function prepareArchive(client: ArchiveClient, sourceID: string, signal?: AbortSignal): Promise<PreparedArchive> {
+  let source: SessionInfo
+  try {
+    source = await client.session.get({ sessionID: sourceID })
+  } catch (error) {
+    throw new Error(`Could not load session: ${message(error)}`)
+  }
   if (source.parentID) throw new Error("Archive the root session, not a child session")
 
-  const statuses = await data(client.session.status(), "Could not read session status")
-  if (statuses[sourceID]?.type === "busy" || statuses[sourceID]?.type === "retry") {
-    throw new Error("Session is still active; wait for it to become idle")
-  }
+  const active = await client.session.active()
+  if (active[sourceID] !== undefined) throw new Error("Session is still active; wait for it to become idle")
 
-  const before = await data(client.session.messages({ sessionID: sourceID }), "Could not read session messages")
-  const user = latestUser(before)
-  const existingSummary = latestCompletedSummary(before)
-  const existingIndex = existingSummary ? before.indexOf(existingSummary) : -1
-  const needsCompaction = !existingSummary || existingIndex !== before.length - 1
-
-  let after = before
-  let summary = existingSummary
-  if (needsCompaction) {
-    const known = new Set(
-      before.filter((entry) => entry.info.role === "assistant" && entry.info.summary).map((entry) => entry.info.id),
+  let messages = await allMessages(client, sourceID)
+  let summary = latestCompletedCompaction(messages)
+  if (summary === undefined || !isCurrentCompaction(messages, summary)) {
+    await waitForCompaction(
+      client,
+      sourceID,
+      async () => {
+        try {
+          await client.session.compact({ sessionID: sourceID })
+        } catch (error) {
+          throw new Error(`Could not compact session: ${message(error)}`)
+        }
+      },
+      signal,
     )
-    await data(
-      client.session.summarize({
-        sessionID: sourceID,
-        providerID: user.model.providerID,
-        modelID: user.model.modelID,
-        auto: false,
-      }),
-      "Could not compact session",
-    )
-    after = await data(client.session.messages({ sessionID: sourceID }), "Could not read compacted session")
-    summary = completedSummary(after, known)
+    messages = await allMessages(client, sourceID)
+    summary = latestCompletedCompaction(messages)
   }
-  if (!summary) throw new Error("Could not identify a completed compaction summary")
+  if (summary === undefined) throw new Error("Compaction did not create a completed summary")
 
-  const pair = compactionPair(after, summary)
-  const keep = new Set([pair.parent.info.id, pair.summary.info.id])
-  const deleteMessageIDs = after.map((entry) => entry.info.id).filter((id) => !keep.has(id))
+  const keep = new Set([summary.id])
+  const deleteMessageIDs = messages.map((entry) => entry.id).filter((id) => !keep.has(id))
 
-  const children = await data(client.session.children({ sessionID: sourceID }), "Could not list child sessions")
-  const agentChildIDs = children.filter((child) => isAgentChild(child, sourceID, after)).map((child) => child.id)
+  const children = await allChildren(client, sourceID)
+  const agentChildIDs = children.filter((child) => isAgentChild(child, sourceID, messages)).map((child) => child.id)
   const known = new Set(agentChildIDs)
   const orphanChildIDs = children
     .filter((child) => !known.has(child.id) && isOrphanSubagent(child, sourceID))
@@ -184,30 +224,28 @@ export async function prepareArchive(client: ArchiveClient, sourceID: string): P
     deleteMessageIDs,
     agentChildIDs,
     orphanChildIDs,
-    summaryChars: text(pair.summary.parts).length,
+    summaryChars: summary.summary.length,
   }
 }
 
-export async function deletePreparedArchive(client: ArchiveClient, prepared: PreparedArchive): Promise<void> {
-  await each(prepared.deleteMessageIDs, DELETE_CONCURRENCY, async (messageID) => {
-    await data(
-      client.session.deleteMessage({ sessionID: prepared.sourceID, messageID }),
-      `Could not delete message ${messageID}`,
-    )
-  })
-
+export async function removeArchiveChildren(client: ArchiveClient, prepared: PreparedArchive): Promise<void> {
   const childIDs = [...prepared.agentChildIDs, ...prepared.orphanChildIDs]
   await each(childIDs, CHILD_CONCURRENCY, async (sessionID) => {
-    await data(client.session.delete({ sessionID }), `Could not delete child session ${sessionID}`)
+    try {
+      await client.session.remove({ sessionID })
+    } catch (error) {
+      throw new Error(`Could not delete child session ${sessionID}: ${message(error)}`)
+    }
   })
+}
 
+export async function verifyArchive(client: ArchiveClient, prepared: PreparedArchive): Promise<void> {
   const kept = new Set(prepared.keepMessageIDs)
-  const after = await data(client.session.messages({ sessionID: prepared.sourceID }), "Could not verify session")
-  const survivors = after.filter((entry) => !kept.has(entry.info.id)).map((entry) => entry.info.id)
+  const after = await allMessages(client, prepared.sourceID)
+  const survivors = after.filter((entry) => !kept.has(entry.id)).map((entry) => entry.id)
   if (survivors.length > 0) throw new Error(`OpenCode did not delete: ${survivors.join(", ")}`)
 
-  await each(childIDs, CHILD_CONCURRENCY, async (sessionID) => {
-    const result = await client.session.get({ sessionID })
-    if (result.data !== undefined) throw new Error(`OpenCode did not delete child session: ${sessionID}`)
-  })
+  const remaining = new Set((await allChildren(client, prepared.sourceID)).map((child) => child.id))
+  const children = [...prepared.agentChildIDs, ...prepared.orphanChildIDs].filter((id) => remaining.has(id))
+  if (children.length > 0) throw new Error(`OpenCode did not delete child session: ${children.join(", ")}`)
 }

@@ -17,8 +17,15 @@ export type SqliteDatabase = {
 
 export type HistoryPurge = {
   sessionID: string
+  compactionID: string
   boundarySeq: number
+  messages: number
+  messageBytes: number
   events: number
+  eventBytes: number
+  eventBoundarySeq: number | null
+  legacyMessages: number
+  legacyParts: number
   bytes: number
 }
 
@@ -58,36 +65,79 @@ function row<T extends Record<string, SqlValue>>(database: SqliteDatabase, sql: 
 export function prepareHistoryPurge(
   database: SqliteDatabase,
   sessionID: string,
-  keepMessageIDs: string[],
+  compactionID: string,
 ): HistoryPurge | undefined {
-  if (keepMessageIDs.length === 0) return undefined
-  const matches = keepMessageIDs.map(() => "instr(data, ?) > 0").join(" OR ")
   const boundary = row<{ boundary: SqlValue }>(
     database,
-    `SELECT MIN(seq) AS boundary FROM event WHERE aggregate_id = ? AND (${matches})`,
-    [sessionID, ...keepMessageIDs],
+    "SELECT seq AS boundary FROM session_message WHERE session_id = ? AND id = ?",
+    [sessionID, compactionID],
   )?.boundary
   if (typeof boundary !== "number") return undefined
-  const stats = row<{ events: SqlValue; bytes: SqlValue }>(
+
+  const messages = row<{ messages: SqlValue; bytes: SqlValue }>(
     database,
-    "SELECT COUNT(*) AS events, COALESCE(SUM(LENGTH(data)), 0) AS bytes FROM event WHERE aggregate_id = ? AND seq < ?",
-    [sessionID, boundary],
+    "SELECT COUNT(*) AS messages, COALESCE(SUM(LENGTH(data)), 0) AS bytes FROM session_message WHERE session_id = ? AND id != ?",
+    [sessionID, compactionID],
   )
+  const eventBoundary = row<{ boundary: SqlValue }>(
+    database,
+    "SELECT MIN(seq) AS boundary FROM event WHERE aggregate_id = ? AND instr(data, ?) > 0",
+    [sessionID, compactionID],
+  )?.boundary
+  const events =
+    typeof eventBoundary === "number"
+      ? row<{ events: SqlValue; bytes: SqlValue }>(
+          database,
+          "SELECT COUNT(*) AS events, COALESCE(SUM(LENGTH(data)), 0) AS bytes FROM event WHERE aggregate_id = ? AND seq < ?",
+          [sessionID, eventBoundary],
+        )
+      : undefined
+  const legacyMessages = row<{ count: SqlValue }>(
+    database,
+    "SELECT COUNT(*) AS count FROM message WHERE session_id = ?",
+    [sessionID],
+  )?.count
+  const legacyParts = row<{ count: SqlValue }>(
+    database,
+    "SELECT COUNT(*) AS count FROM part WHERE session_id = ?",
+    [sessionID],
+  )?.count
+
+  const messageBytes = typeof messages?.bytes === "number" ? messages.bytes : 0
+  const eventBytes = typeof events?.bytes === "number" ? events.bytes : 0
   return {
     sessionID,
+    compactionID,
     boundarySeq: boundary,
-    events: typeof stats?.events === "number" ? stats.events : 0,
-    bytes: typeof stats?.bytes === "number" ? stats.bytes : 0,
+    messages: typeof messages?.messages === "number" ? messages.messages : 0,
+    messageBytes,
+    events: typeof events?.events === "number" ? events.events : 0,
+    eventBytes,
+    eventBoundarySeq: typeof eventBoundary === "number" ? eventBoundary : null,
+    legacyMessages: typeof legacyMessages === "number" ? legacyMessages : 0,
+    legacyParts: typeof legacyParts === "number" ? legacyParts : 0,
+    bytes: messageBytes + eventBytes,
   }
 }
 
 export function purgeHistory(database: SqliteDatabase, purge: HistoryPurge): void {
-  if (purge.events === 0) return
-  database.run(
-    "DELETE FROM event WHERE aggregate_id = ? AND seq < ?",
-    purge.sessionID,
-    purge.boundarySeq,
-  )
+  database.exec("BEGIN")
+  try {
+    database.run("DELETE FROM session_message WHERE session_id = ? AND id != ?", purge.sessionID, purge.compactionID)
+    database.run("DELETE FROM part WHERE session_id = ?", purge.sessionID)
+    database.run("DELETE FROM message WHERE session_id = ?", purge.sessionID)
+    if (purge.eventBoundarySeq !== null && purge.events > 0) {
+      database.run("DELETE FROM event WHERE aggregate_id = ? AND seq < ?", purge.sessionID, purge.eventBoundarySeq)
+    }
+    database.exec("COMMIT")
+  } catch (error) {
+    try {
+      database.exec("ROLLBACK")
+    } catch {
+      // The transaction is already closed; surface the original failure.
+    }
+    throw error
+  }
 }
 
 export function checkpoint(database: SqliteDatabase): void {
