@@ -42,90 +42,96 @@ async function confirm(context: Context, prepared: PreparedArchive, purge: Histo
 export default Plugin.define({
   id: "evgenyzh.session-archiver",
   setup(context) {
-    context.keymap.layer(() => ({
-      mode: "global",
-      commands: [{
-        id: "session-archiver.archive",
-        title: "Archive current session",
-        description: "Keep only the compaction summary, purge its history, and delete subagent children after confirmation",
-        group: "Session",
-        slash: { name: "archive-session" },
-        enabled: () => context.ui.router.current().type === "session",
-        run: async () => {
-          const route = context.ui.router.current()
-          if (route.type !== "session") return
-          const sourceID = route.sessionID
-          context.ui.toast.show({ title: "Session archiver", message: "Preparing archive...", duration: 3000 })
+    context.ui.slot({
+      append: "app",
+      render: () => {
+        context.keymap.layer(() => ({
+          mode: "global",
+          commands: [{
+            id: "session-archiver.archive",
+            title: "Archive current session",
+            description: "Keep only the compaction summary, purge its history, and delete subagent children after confirmation",
+            group: "Session",
+            slash: { name: "archive-session" },
+            enabled: () => context.ui.router.current().type === "session",
+            run: async () => {
+              const route = context.ui.router.current()
+              if (route.type !== "session") return
+              const sourceID = route.sessionID
+              context.ui.toast.show({ title: "Session archiver", message: "Preparing archive...", duration: 3000 })
 
-          let prepared: PreparedArchive
-          try {
-            prepared = await prepareArchive(context.client, sourceID)
-          } catch (error) {
-            context.ui.toast.show({ variant: "error", title: "Session archiver", message: describe(error), duration: 8000 })
-            return
-          }
+              let prepared: PreparedArchive
+              try {
+                prepared = await prepareArchive(context.client, sourceID)
+              } catch (error) {
+                context.ui.toast.show({ variant: "error", title: "Session archiver", message: describe(error), duration: 8000 })
+                return
+              }
 
-          const database = await openArchiveDatabase()
-          if (!database) {
-            context.ui.toast.show({
-              variant: "error",
-              title: "Session archiver",
-              message: "Local OpenCode database unavailable; messages cannot be pruned.",
-              duration: 8000,
-            })
-            return
-          }
+              const database = await openArchiveDatabase()
+              if (!database) {
+                context.ui.toast.show({
+                  variant: "error",
+                  title: "Session archiver",
+                  message: "Local OpenCode database unavailable; messages cannot be pruned.",
+                  duration: 8000,
+                })
+                return
+              }
 
-          let purge: HistoryPurge | undefined
-          try {
-            purge = prepareHistoryPurge(database, sourceID, prepared.keepMessageIDs[0] ?? "")
-          } catch (error) {
-            database.close()
-            context.ui.toast.show({
-              variant: "error",
-              title: "Session archiver",
-              message: `Could not inspect local history: ${describe(error)}`,
-              duration: 8000,
-            })
-            return
-          }
-          if (!purge) {
-            database.close()
-            context.ui.toast.show({
-              variant: "error",
-              title: "Session archiver",
-              message: "The local database has no messages for this session.",
-              duration: 8000,
-            })
-            return
-          }
+              let purge: HistoryPurge | undefined
+              try {
+                purge = prepareHistoryPurge(database, sourceID, prepared.keepMessageIDs[0] ?? "")
+              } catch (error) {
+                database.close()
+                context.ui.toast.show({
+                  variant: "error",
+                  title: "Session archiver",
+                  message: `Could not inspect local history: ${describe(error)}`,
+                  duration: 8000,
+                })
+                return
+              }
+              if (!purge) {
+                database.close()
+                context.ui.toast.show({
+                  variant: "error",
+                  title: "Session archiver",
+                  message: "The local database has no messages for this session.",
+                  duration: 8000,
+                })
+                return
+              }
 
-          try {
-            if (!(await confirm(context, prepared, purge))) {
-              context.ui.toast.show({ variant: "info", title: "Session archiver", message: "Session was kept unchanged.", duration: 4000 })
-              return
-            }
-            purgeHistory(database, purge)
-            await removeArchiveChildren(context.client, prepared)
-            await verifyArchive(context.client, prepared)
-            checkpoint(database)
-            context.data.session.message.invalidate(sourceID)
-            context.data.session.invalidate(sourceID)
-            context.ui.toast.show({
-              variant: "success",
-              title: "Session archived",
-              message: purge.bytes > 0
-                ? `Only the compaction summary remains; ${megabytes(purge.bytes)} of history purged.`
-                : "Only the compaction summary remains.",
-              duration: 5000,
-            })
-          } catch (error) {
-            context.ui.toast.show({ variant: "error", title: "Archive failed", message: describe(error), duration: 10000 })
-          } finally {
-            database.close()
-          }
-        },
-      }],
-    }))
+              try {
+                if (!(await confirm(context, prepared, purge))) {
+                  context.ui.toast.show({ variant: "info", title: "Session archiver", message: "Session was kept unchanged.", duration: 4000 })
+                  return
+                }
+                purgeHistory(database, purge)
+                await removeArchiveChildren(context.client, prepared)
+                await verifyArchive(context.client, prepared)
+                checkpoint(database)
+                context.data.session.message.invalidate(sourceID)
+                context.data.session.invalidate(sourceID)
+                context.ui.toast.show({
+                  variant: "success",
+                  title: "Session archived",
+                  message: purge.bytes > 0
+                    ? `Only the compaction summary remains; ${megabytes(purge.bytes)} of history purged.`
+                    : "Only the compaction summary remains.",
+                  duration: 5000,
+                })
+              } catch (error) {
+                context.ui.toast.show({ variant: "error", title: "Archive failed", message: describe(error), duration: 10000 })
+              } finally {
+                database.close()
+              }
+            },
+          }],
+        }))
+        return null
+      },
+    })
   },
 })
