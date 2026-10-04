@@ -1,6 +1,7 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite"
 import { describe, expect, it } from "vitest"
 import {
+  openLocalDatabase,
   prepareHistoryPurge,
   purgeHistory,
   resolveDatabasePath,
@@ -174,5 +175,11 @@ describe("database path", () => {
     expect(resolveDatabasePath({ OPENCODE_DB: "/tmp/custom.db" }, "/home/user")).toBe("/tmp/custom.db")
     expect(resolveDatabasePath({ OPENCODE_DB: "custom.db" }, "/home/user")).toBe("/home/user/.local/share/opencode/custom.db")
     expect(resolveDatabasePath({ OPENCODE_DB: ":memory:" }, "/home/user")).toBeUndefined()
+  })
+
+  it("reports a reason when the database file is missing", async () => {
+    const result = await openLocalDatabase("/nonexistent/opencode.db")
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toContain("not found")
   })
 })

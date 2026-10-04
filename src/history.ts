@@ -42,19 +42,26 @@ export function resolveDatabasePath(env: NodeJS.ProcessEnv = process.env, home: 
   return join(dataDir, "opencode.db")
 }
 
-export async function openLocalDatabase(path: string): Promise<SqliteDatabase | undefined> {
-  if (!existsSync(path)) return undefined
+export type DatabaseOpenResult =
+  | { readonly ok: true; readonly database: SqliteDatabase }
+  | { readonly ok: false; readonly reason: string }
+
+export async function openLocalDatabase(path: string): Promise<DatabaseOpenResult> {
+  if (!existsSync(path)) return { ok: false, reason: `database file not found at ${path}` }
   try {
     const specifier = "bun:sqlite"
     const module = (await import(specifier)) as {
       Database: new (filename: string, options?: { create?: boolean; readwrite?: boolean }) => BunDatabase
     }
-    const database = new module.Database(path, { create: false })
+    // Bun 1.4.x rejects `{ create: false }` with "bad parameter or other API misuse".
+    // The existsSync check above already guarantees the file is present, so the default
+    // create behaviour is safe and opens the existing database read-write.
+    const database = new module.Database(path)
     database.exec("PRAGMA busy_timeout = 5000")
     database.exec("PRAGMA foreign_keys = ON")
-    return database
-  } catch {
-    return undefined
+    return { ok: true, database }
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
 }
 

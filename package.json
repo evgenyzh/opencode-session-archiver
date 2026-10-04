@@ -1,6 +1,6 @@
 {
   "name": "@evgenyzh/opencode-session-archiver",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Reduce an OpenCode session to its native compaction summary.",
   "license": "MIT",
   "author": "Evgeny Zhuravlev",
